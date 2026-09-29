@@ -4017,7 +4017,9 @@ function audioEvent(kind, p, arg) {
 }
 let audioAcc = 0;
 function updateAudio(dt) {
-  if (!AU.ctx) return; const t = now(), L = AU.loops, set = (node, v, tau = 0.3) => node.gain.setTargetAtTime(v, t, tau);
+  if (!AU.ctx) return; const t = now(), L = AU.loops;
+  // accepts a GainNode or a loop record {src, gain: GainNode, filt}
+  const set = (node, v, tau = 0.3) => { const g = node.gain instanceof AudioParam ? node.gain : node.gain.gain; g.setTargetAtTime(Number.isFinite(v) ? v : 0, t, tau); };
   AU.master.gain.setTargetAtTime(AU.muted ? 0 : P.volume, t, 0.1);
   const under = GU.uCamUnder.value > 0.5;
   AU.lp.frequency.setTargetAtTime(under ? 420 : 18000, t, 0.12);
@@ -4326,7 +4328,8 @@ const clock = new THREE.Clock();
 let worldTime = 0;
 function tick() {
   requestAnimationFrame(tick);
-  frameStep(Math.min(clock.getDelta(), 0.05));
+  try { frameStep(Math.min(clock.getDelta(), 0.05)); }
+  catch (e) { if (!tick.errs) console.error('frame error', e); tick.errs = (tick.errs || 0) + 1; try { renderFrame(); } catch (e2) { } }
 }
 // advance the world by a fixed step (also used by tests: COVE.advance)
 function frameStep(rdt, draw = true) {
@@ -4376,7 +4379,7 @@ function updateWaterLook() {
   WU.uFoamAmt.value = P.foam; WU.uBiolum.value = P.biolum; GU.uCaustInt.value = P.caustics;
 }
 function advance(sec, fps = 60) { const n = Math.round(sec * fps); for (let i = 0; i < n; i++) frameStep(1 / fps, i === n - 1); }
-window.COVE = { CAM, SHOTS, setMode, setWeather, cycleWeather, HAND, skipStone, collectShell, buildTower, onClick, pick, AU, audioStart, SANDCASTLE, STONES, setQuality, get resScale() { return resScale; }, LENS, SCHOOL, POOLS,
+window.COVE = { audioEvent, CAM, SHOTS, setMode, setWeather, cycleWeather, HAND, skipStone, collectShell, buildTower, onClick, pick, AU, audioStart, SANDCASTLE, STONES, setQuality, get resScale() { return resScale; }, LENS, SCHOOL, POOLS,
   setLineup: v => { fishLineup = v; }, FISH, TURTLE, CRABS, GULLS, splash, DECOR, PALMS, skyMat, hemi, sun, compositeMat, STRUCT, dbgView, advance, frameStep, buildLog, profile, THREE, scene, camera, renderer, P, ENV, GU, WU, RT, setCam, stats, waterHeightAt, groundAt, maskSample, input };
 document.getElementById('loader').style.opacity = 0;
 setTimeout(() => document.getElementById('loader').remove(), 1000);
