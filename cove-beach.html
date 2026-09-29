@@ -4913,9 +4913,10 @@ function buildGUI() {
   cam.add(P, 'volume', 0, 1, 0.01).name('Volume');
   cam.add(P, 'sound').name('Sound').onChange(v => { audioStart(); setMuted(!v); });
   const cu = gui.addFolder('Close-ups');
-  const jump = i => () => { setMode('Cinematic'); CAM.shot = i; CAM.t = 0.8; shotEnter(SHOTS[i]); };
+  const jump = name => () => { const i = SHOTS.findIndex(s => s.name === name); setMode('Cinematic'); CAM.shot = i; CAM.t = 0.8; shotEnter(SHOTS[i]); };   // by name, so reordering the tour can't break it
   const CL = {
-    'The cove from above': jump(0), 'Breaking waves': jump(2), 'The sea arch': jump(3), 'Tide pools': jump(4), 'Palms and hammock': jump(5), 'Sandcastle': jump(6), 'Beneath the waves': jump(8),
+    'The cove from above': jump('The cove from above'), 'Breaking waves': jump('Breaking waves'), 'The sea arch': jump('The sea arch'), 'Tide pools': jump('Tide pools'),
+    'Palms and hammock': jump('Palms and hammock'), 'The village on the hill': jump('The village on the hill'), 'Sandcastle': jump('Sandcastle'), 'Beneath the waves': jump('Beneath the waves'),
     'Fish line-up': () => { setMode('Manual'); const gy = groundAt(0, 14); fishLineup = fishLineup ? null : { x: -1.4, y: gy + 0.9, z: 14 }; if (fishLineup) setCam([0.0, gy + 0.9, 15.9], [0.0, gy + 0.88, 14]); },
     'Follow the turtle': () => { CAM.follow = 0; setMode('Follow'); },
   };
