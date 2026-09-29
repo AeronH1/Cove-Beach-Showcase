@@ -1679,13 +1679,16 @@ function buildPier() {
   STRUCT.pier = { A, B, dir, side, posts };
 }
 // rowboat: hull from cross sections, painted outside, bare wood inside
+const HULL_L = 3.4;   // the water shader's inHull() mirrors these cross sections
+const hullW = u => 0.7 * Math.pow(Math.max(0, 1 - Math.pow(Math.max(u, 0), 2.2)), 0.55) * (u < 0 ? lerp(0.82, 1, 1 + u) : 1);
+const hullSheer = u => 0.08 * u * u + 0.1 * Math.max(u, 0) ** 2;
 function hullGeo() {
-  const L = 3.4, st = 28, ring = 14, pos = [], col = [], uv = [], idx = [];
+  const L = HULL_L, st = 28, ring = 14, pos = [], col = [], uv = [], idx = [];
   for (let i = 0; i <= st; i++) {
     const u = i / st * 2 - 1;                           // -1 transom .. +1 bow
-    const w = 0.7 * Math.pow(Math.max(0, 1 - Math.pow(Math.max(u, 0), 2.2)), 0.55) * (u < 0 ? lerp(0.82, 1, 1 + u) : 1);
+    const w = hullW(u);
     const depth = 0.42 * (1 - 0.25 * u * u) + 0.08 * Math.max(u, 0) ** 3;
-    const sheer = 0.08 * u * u + 0.1 * Math.max(u, 0) ** 2;
+    const sheer = hullSheer(u);
     for (let j = 0; j <= ring; j++) {
       const phi = j / ring * Math.PI, x = Math.cos(phi) * w, y = -(Math.sin(phi) ** 0.8) * depth + sheer;
       pos.push(x, y, u * L / 2); uv.push(j / ring, i / st);
@@ -1694,6 +1697,10 @@ function hullGeo() {
     }
   }
   for (let i = 0; i < st; i++) for (let j = 0; j < ring; j++) { const a = i * (ring + 1) + j, b = a + ring + 1; idx.push(a, b, a + 1, a + 1, b, b + 1); }
+  // transom: a flat board closing the stern, fanned from the middle of its top edge
+  const c0 = pos.length / 3; pos.push(0, pos[1], pos[2]); uv.push(0.5, 0); col.push(0.12, 0.32, 0.55);
+  for (let j = 0; j <= ring; j++) { pos.push(pos[j * 3], pos[j * 3 + 1], pos[j * 3 + 2]); uv.push(j / ring, 0); col.push(col[j * 3], col[j * 3 + 1], col[j * 3 + 2]); }
+  for (let j = 0; j < ring; j++) idx.push(c0, c0 + 1 + j, c0 + 2 + j);
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.setIndex(idx); g.computeVertexNormals(); return g;
 }
@@ -1705,9 +1712,13 @@ function buildBoat() {
   const seats = mergeGeos([box(1.2, 0.04, 0.26, [0, -0.02, 0.2]), box(1.05, 0.04, 0.24, [0, -0.02, -0.9]), box(0.9, 0.04, 0.24, [0, 0.0, 1.0])]);
   const oars = mergeGeos([xform(new THREE.CylinderGeometry(0.02, 0.02, 2.2, 6), { p: [0.2, 0.05, 0], r: [Math.PI / 2 - 0.05, 0, 0.08] }), box(0.12, 0.012, 0.45, [0.25, 0.1, -1.0]),
     xform(new THREE.CylinderGeometry(0.02, 0.02, 2.2, 6), { p: [-0.25, 0.06, 0], r: [Math.PI / 2 + 0.04, 0, -0.05] }), box(0.12, 0.012, 0.45, [-0.3, 0.12, 1.0])]);
-  boat.add(outer, inner, meshOf(seats, MAT.wood, L_BOTH), meshOf(oars, MAT.woodDark, L_ABOVE));
+  // rub rail capping the gunwale on both sides and across the transom
+  const railPts = sx => Array.from({ length: 25 }, (_, i) => { const u = i / 24 * 2 - 1; return new V3(sx * hullW(u) * 1.01, hullSheer(u) + 0.012, u * HULL_L / 2); });
+  const rails = mergeGeos([tubeAlong(railPts(1), 0.028, 6, 48), tubeAlong(railPts(-1), 0.028, 6, 48),
+    tubeAlong([new V3(-hullW(-1), hullSheer(-1) + 0.012, -HULL_L / 2), new V3(hullW(-1), hullSheer(-1) + 0.012, -HULL_L / 2)], 0.028, 6, 2)], ['position', 'normal']);
+  boat.add(outer, inner, meshOf(seats, MAT.wood, L_BOTH), meshOf(oars, MAT.woodDark, L_ABOVE), meshOf(rails, MAT.woodDark, L_BOTH));
   const pr = STRUCT.pier, p = pr.B.clone().addScaledVector(pr.dir, -4.2).addScaledVector(pr.side, 3.2);
-  boat.position.set(p.x, 0, p.z); boat.rotation.y = Math.atan2(pr.dir.x, pr.dir.z) + 0.25;
+  boat.position.set(p.x, 0.3, p.z); boat.rotation.y = Math.atan2(pr.dir.x, pr.dir.z) + 0.25;
   scene.add(boat);
   STRUCT.boat = { obj: boat, base: p.clone(), yaw: boat.rotation.y, knock: 0, creak: 0, prevRoll: 0 };
   const rope = meshOf(ropeBetween(new V3(), new V3(), 0.3, 0.015), MAT.rope, L_ABOVE, { cast: false }); scene.add(rope); STRUCT.boat.rope = rope;
@@ -1717,11 +1728,12 @@ function updateBoat(dt, t) {
   const o = b.obj, c = Math.cos(b.yaw), s = Math.sin(b.yaw);
   const hC = waterHeightAt(b.base.x, b.base.z), hB = waterHeightAt(b.base.x + s * 1.4, b.base.z + c * 1.4), hS = waterHeightAt(b.base.x - s * 1.4, b.base.z - c * 1.4);
   const hL = waterHeightAt(b.base.x + c * 0.6, b.base.z - s * 0.6), hR = waterHeightAt(b.base.x - c * 0.6, b.base.z + s * 0.6);
-  o.position.y = damp(o.position.y, (hC + hB + hS) / 3 + 0.12, 3, dt);
+  o.position.y = damp(o.position.y, (hC + hB + hS) / 3 + 0.3, 3, dt);
   o.rotation.set(0, 0, 0); o.rotation.y = b.yaw + 0.06 * Math.sin(t * 0.21);
   const pitch = Math.atan2(hS - hB, 2.8), roll = Math.atan2(hL - hR, 1.2);
   o.rotateX(damp(b.pitch || 0, pitch, 3, dt)); b.pitch = pitch; o.rotateZ(roll);
   b.creak = Math.abs(roll - b.prevRoll) / Math.max(dt, 1e-3); b.prevRoll = roll;
+  o.updateMatrixWorld(); if (WU.uBoatInv) WU.uBoatInv.value.copy(o.matrixWorld).invert();
   // mooring line to the nearest pier post
   const bow = new V3(0, 0.15, 1.6).applyMatrix4(o.matrixWorld), post = STRUCT.pier.posts.reduce((a, p) => a.distanceTo(bow) < p.distanceTo(bow) ? a : p);
   if (frameNo % 3 === 0) { b.rope.geometry.dispose(); b.rope.geometry = ropeBetween(bow, post.clone().add(new V3(0, -0.2, 0)), 0.35, 0.015, 10); }
@@ -2240,7 +2252,7 @@ function buildDecorations() {
   const cushionTex = texStripes(['#ffffff', '#e8e4dc', '#ffffff', '#cfc9bd'], { dir: 'v', w: 256, h: 16 });
   const cushionMat = physMat({ map: cushionTex, roughness: 0.9, sheen: 0.7, sheenRoughness: 0.5, sheenColor: new C3(1, 1, 1) }, { fabric: true, trans: 0.25 });
   const lspots = [[-10.2, 52.3, 0.2], [-8.0, 52.4, -0.1], [-3.5, 52.2, 0.05], [9.6, 52.6, 0.1], [11.6, 52.5, -0.15]];
-  const lm = lspots.map(([x, z, r]) => { EXCL.push({ x, z, r: 1.1 }); return mtx([x, groundAt(x, z) - 0.03, z], [0, Math.PI + r, 0]); });
+  const lm = lspots.map(([x, z, r]) => { EXCL.push({ x, z, r: 1.1 }); return mtx([x, groundAt(x, z) - 0.03, z], [0, r, 0]); });   // backrest to the dunes, feet to the sea
   const cushions = instFrom(cushionG, cushionMat, lm, L_ABOVE);
   const ccol = [0x2a78c2, 0xe9483b, 0x18a39a, 0xf2b632, 0x2a78c2]; ccol.forEach((c, i) => cushions.setColorAt(i, new C3(c).lerp(new C3(1, 1, 1), 0.25))); cushions.instanceColor.needsUpdate = true;
   grp.add(instFrom(loungerG, MAT.wood, lm, L_ABOVE), cushions);
@@ -2772,7 +2784,7 @@ uniform sampler2D tRefl, tRefr, tRefrDepth, tFoamWet, tFoamTex, tWaterN, tShadow
 uniform mat4 uReflMat, uShadowMat, uViewProj;
 uniform vec2 uRes; uniform float uNear, uFar, uFoamAmt, uBiolum, uShadowOn, uReflOn;
 uniform vec3 uSkyAmb, uSkyZen, uSkyHor;
-uniform vec4 uLampPos[24], uLampCol[24]; uniform float uLampOn;
+uniform vec4 uLampPos[24], uLampCol[24]; uniform float uLampOn; uniform mat4 uBoatInv;
 varying vec2 vXZ; varying float vAtt; varying float vEta; varying float vBrk; varying float vFront; varying float vViewZ; varying vec2 vShoreN; varying float vSheet; varying float vCrest; varying float vLevel; varying float vBaseY;
 float linZ(float d) { float z = d * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - z * (uFar - uNear)); }
 float shadowAt(vec3 p) {
@@ -2801,8 +2813,19 @@ vec2 rainRings(vec2 p, float t) {
   return acc * 0.45;
 }
 vec3 skyDir(vec3 d) { return mix(uSkyHor, uSkyZen, pow(clamp(d.y, 0.0, 1.0), 0.5)); }
+// true inside the rowboat's hull (same cross sections as hullGeo) so no water shows in the boat
+bool inHull(vec3 P) {
+  vec3 b = (uBoatInv * vec4(P, 1.0)).xyz; float u = b.z / 1.7;
+  if (abs(u) > 1.0) return false;
+  float up = max(u, 0.0), w = 0.7 * pow(max(0.0, 1.0 - pow(up, 2.2)), 0.55) * (u < 0.0 ? mix(0.82, 1.0, 1.0 + u) : 1.0);
+  float depth = 0.42 * (1.0 - 0.25 * u * u) + 0.08 * up * up * up, sheer = 0.08 * u * u + 0.1 * up * up;
+  if (b.y > sheer) return false;
+  float s = pow(clamp((sheer - b.y) / depth, 0.0, 1.0), 1.25);
+  return abs(b.x) < w * sqrt(max(0.0, 1.0 - s * s)) * 0.99;
+}
 void main() {
   vec3 P = vWPos;
+  if (inHull(P)) discard;
   float terr = terrainAt(P.xz);
   vec3 Vd = cameraPosition - P; float dist = length(Vd); vec3 V = Vd / dist;
   float pix = dist * 0.0012;
@@ -2953,7 +2976,7 @@ function buildWater() {
     uReflMat: { value: new M4() }, uShadowMat: { value: new M4() }, uViewProj: { value: new M4() },
     uRes: { value: new V2(1, 1) }, uNear: { value: camera.near }, uFar: { value: camera.far }, uFoamAmt: { value: 1 }, uBiolum: { value: 1 },
     uShadowOn: { value: 0 }, uReflOn: { value: 1 }, uSkyAmb: { value: new C3(0.3, 0.35, 0.45) }, uSkyZen: { value: new C3(0.2, 0.35, 0.7) }, uSkyHor: { value: new C3(0.6, 0.7, 0.8) },
-    uGridS: { value: S }, uGridN: { value: N }, uGridC: { value: new V2(CX, CZ) },
+    uGridS: { value: S }, uGridN: { value: N }, uGridC: { value: new V2(CX, CZ) }, uBoatInv: { value: new M4().makeTranslation(0, 0, 1e4) },
   });
   const mat = new THREE.ShaderMaterial({
     uniforms: Object.assign({}, GU, WU),
