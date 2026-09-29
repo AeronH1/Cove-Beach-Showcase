@@ -2,9 +2,11 @@
 
 An interactive tropical cove rendered in real time in the browser: a crescent of white sand between limestone cliffs, a sea arch, a pier and boardwalk, palms, reef and sea life, and a little hillside village behind the beach. Everything (terrain, water, textures, models, sound) is generated in code; the whole thing is one file, `cove-beach.html`.
 
+**Live demo: <https://aeronh1.github.io/Cove-Beach-Showcase/>**
+
 ## Running it
 
-Open `cove-beach.html` in a desktop browser (Chrome, Edge or Firefox; WebGL 2 required). It needs an internet connection the first time to load two libraries from cdnjs:
+The live demo above runs it straight from GitHub Pages. To run it locally, open `cove-beach.html` in a desktop browser (Chrome, Edge or Firefox; WebGL 2 required). It needs an internet connection the first time to load two libraries from cdnjs:
 
 - [three.js](https://threejs.org/) r160
 - [dat.gui](https://github.com/dataarts/dat.gui) 0.7.9
