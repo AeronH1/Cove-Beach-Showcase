@@ -891,7 +891,7 @@ function patchMaterial(mat, o = {}) {
       .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + GLSL_NORMAL)
       .replace('#include <lights_fragment_begin>', GLSL_PRELIGHT + LFB)
       .replace('#include <lights_fragment_end>', GLSL_LIGHTS_END + '#include <lights_fragment_end>')
-      .replace('#include <aomap_fragment>', GLSL_POSTLIGHT + (o.post || '') + '#include <aomap_fragment>')
+      .replace('#include <aomap_fragment>', GLSL_POSTLIGHT + (o.post || '') + '\n#include <aomap_fragment>')
       .replace('#include <fog_fragment>', GLSL_FOG);
     (o.vReplace || []).forEach(([a, b]) => { vs = vs.replace(a, b); });
     (o.fReplace || []).forEach(([a, b]) => { fs = fs.replace(a, b); });
@@ -2303,7 +2303,7 @@ void main() {
   float fp = texture2D(tFoamTex, fuv).r * 0.62 + texture2D(tFoamTex, fuv * 2.37 + 0.31).r * 0.38;
   float foam = smoothstep(1.0 - fd * 0.62, 1.0 - fd * 0.62 + 0.16, fp) * clamp(fd * 1.4, 0.0, 1.0);
   foam = max(foam, smoothstep(0.55, 0.95, vBrk * vFront) * smoothstep(0.25, 0.55, fp) * 0.85);
-  if (!gl_FrontFacing) {
+  if (uCamUnder > 0.5) {
     // ---------- seen from below: Snell's window, total internal reflection past 48.6 deg
     vec3 Nd = -normalize(gn + vec3(dn.x, 0.0, dn.y) * 0.35);
     vec3 I = -V;
@@ -3188,24 +3188,228 @@ vec3 acesFilm(vec3 c) {
 }
 vec3 toSRGB(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 `;
-const compositeMat = new THREE.ShaderMaterial({
-  uniforms: { tColor: { value: null }, uExposure: { value: 0.9 }, uGrade: { value: new V3(1, 1, 1) }, uVignette: { value: 0.32 } },
-  vertexShader: POST_VS, fragmentShader: GLSL_ACES + `
-    uniform sampler2D tColor; uniform float uExposure, uVignette; uniform vec3 uGrade; varying vec2 vUv;
-    void main(){
-      vec3 c = texture2D(tColor, vUv).rgb * uExposure / 0.6;
-      c = acesFilm(c) * uGrade;
-      vec2 q = vUv - 0.5; c *= 1.0 - uVignette * smoothstep(0.2, 0.9, dot(q, q) * 2.2);
-      gl_FragColor = vec4(toSRGB(clamp(c, 0.0, 1.0)), 1.0);
-    }`, depthTest: false, depthWrite: false,
+const PU = {        // uniforms shared by post passes
+  tDepth: { value: null }, tColor: { value: null }, uProj: { value: new M4() }, uInvProj: { value: new M4() }, uCamWorld: { value: new M4() },
+  uRes: { value: new V2(1, 1) }, uNear: { value: 0.1 }, uFar: { value: 5000 },
+  uFocal: { value: 0.025 }, uFstop: { value: 8 }, uMaxBokeh: { value: 10 }, tFocus: { value: null },
+};
+const GLSL_POSTC = `
+uniform sampler2D tDepth; uniform mat4 uProj, uInvProj, uCamWorld; uniform vec2 uRes; uniform float uNear, uFar;
+varying vec2 vUv;
+float linZ(float d) { float z = d * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - z * (uFar - uNear)); }
+vec3 viewPos(vec2 uv) { float d = texture2D(tDepth, uv).r; vec4 p = uInvProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0); return p.xyz / p.w; }
+float ph(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+`;
+const GLSL_COC = `
+uniform float uFocal, uFstop, uMaxBokeh; uniform sampler2D tFocus;
+float cocPx(float z) {
+  float S = max(texture2D(tFocus, vec2(0.5)).r, 0.3), f = uFocal;
+  float c = f * f * abs(z - S) / (uFstop * z * max(S - f, 1e-3));
+  return min(c / 0.024 * uRes.y, uMaxBokeh);
+}
+`;
+const pmat = (fs, uni = {}) => new THREE.ShaderMaterial({ uniforms: Object.assign({}, PU, uni), vertexShader: POST_VS, fragmentShader: fs, depthTest: false, depthWrite: false });
+const POST = {};
+POST.ssao = pmat(GLSL_POSTC + `
+  uniform float uRadius;
+  void main() {
+    float d = texture2D(tDepth, vUv).r; if (d >= 0.99999) { gl_FragColor = vec4(1.0); return; }
+    vec3 P = viewPos(vUv); vec2 px = 1.0 / uRes;
+    vec3 Pr = viewPos(vUv + vec2(px.x, 0.0)), Pl = viewPos(vUv - vec2(px.x, 0.0)), Pu = viewPos(vUv + vec2(0.0, px.y)), Pd = viewPos(vUv - vec2(0.0, px.y));
+    vec3 dx = abs(Pr.z - P.z) < abs(P.z - Pl.z) ? Pr - P : P - Pl, dy = abs(Pu.z - P.z) < abs(P.z - Pd.z) ? Pu - P : P - Pd;
+    vec3 N = normalize(cross(dx, dy)); if (dot(N, P) > 0.0) N = -N;
+    float rot = ph(gl_FragCoord.xy) * 6.2831;
+    vec3 rv = normalize(vec3(cos(rot), sin(rot), 0.3)); vec3 T = normalize(rv - N * dot(rv, N)); vec3 B = cross(N, T);
+    float R = uRadius * clamp(-P.z / 12.0 + 0.4, 0.4, 2.5);
+    float occ = 0.0;
+    for (int i = 0; i < 12; i++) {
+      float fi = float(i), a = fi * 2.39996 + rot, r = sqrt((fi + 0.5) / 12.0);
+      vec3 k = vec3(cos(a) * r, sin(a) * r, sqrt(max(0.0, 1.0 - r * r)));
+      float sc = mix(0.15, 1.0, (fi / 12.0) * (fi / 12.0));
+      vec3 S = P + (T * k.x + B * k.y + N * k.z) * R * sc;
+      vec4 c = uProj * vec4(S, 1.0); vec2 suv = c.xy / c.w * 0.5 + 0.5;
+      float sz = viewPos(suv).z;
+      float range = smoothstep(0.0, 1.0, R / abs(P.z - sz));
+      occ += (sz >= S.z + 0.03 * R ? 1.0 : 0.0) * range;
+    }
+    gl_FragColor = vec4(vec3(1.0 - occ / 12.0), 1.0);
+  }`, { uRadius: { value: 0.7 } });
+POST.blur = pmat(GLSL_POSTC + `
+  uniform sampler2D tSrc; uniform vec2 uSrcRes;
+  void main() {
+    float z0 = linZ(texture2D(tDepth, vUv).r), acc = 0.0, w = 0.0;
+    for (int y = -2; y <= 1; y++) for (int x = -2; x <= 1; x++) {
+      vec2 o = (vec2(float(x), float(y)) + 0.5) / uSrcRes;
+      float z = linZ(texture2D(tDepth, vUv + o).r), ww = 1.0 / (1.0 + abs(z - z0) * 4.0 / max(z0, 0.1));
+      acc += texture2D(tSrc, vUv + o).r * ww; w += ww;
+    }
+    gl_FragColor = vec4(vec3(acc / w), 1.0);
+  }`, { tSrc: { value: null }, uSrcRes: { value: new V2() } });
+POST.prefilter = pmat(`
+  uniform sampler2D tColor; uniform float uThreshold; uniform vec2 uTexel; varying vec2 vUv;
+  void main() {
+    vec3 c = (texture2D(tColor, vUv + uTexel * vec2(-0.5, -0.5)).rgb + texture2D(tColor, vUv + uTexel * vec2(0.5, -0.5)).rgb + texture2D(tColor, vUv + uTexel * vec2(-0.5, 0.5)).rgb + texture2D(tColor, vUv + uTexel * vec2(0.5, 0.5)).rgb) * 0.25;
+    c = min(c, vec3(60.0));
+    float br = max(c.r, max(c.g, c.b)), knee = uThreshold * 0.5;
+    float soft = clamp(br - uThreshold + knee, 0.0, 2.0 * knee); soft = soft * soft / (4.0 * knee + 1e-4);
+    float w = max(soft, br - uThreshold) / max(br, 1e-4);
+    gl_FragColor = vec4(c * w, 1.0);
+  }`, { uThreshold: { value: 0.9 }, uTexel: { value: new V2() } });
+POST.down = pmat(`
+  uniform sampler2D tSrc; uniform vec2 uTexel; varying vec2 vUv;
+  void main() {
+    vec3 c = texture2D(tSrc, vUv).rgb * 0.5;
+    c += (texture2D(tSrc, vUv + uTexel * vec2(-1.0, -1.0)).rgb + texture2D(tSrc, vUv + uTexel * vec2(1.0, -1.0)).rgb + texture2D(tSrc, vUv + uTexel * vec2(-1.0, 1.0)).rgb + texture2D(tSrc, vUv + uTexel * vec2(1.0, 1.0)).rgb) * 0.125;
+    gl_FragColor = vec4(c, 1.0);
+  }`, { tSrc: { value: null }, uTexel: { value: new V2() } });
+POST.up = pmat(`
+  uniform sampler2D tSrc, tBase; uniform vec2 uTexel; varying vec2 vUv;
+  void main() {
+    vec3 c = vec3(0.0);
+    c += texture2D(tSrc, vUv + uTexel * vec2(-1.0, 0.0)).rgb * 2.0 + texture2D(tSrc, vUv + uTexel * vec2(1.0, 0.0)).rgb * 2.0;
+    c += texture2D(tSrc, vUv + uTexel * vec2(0.0, -1.0)).rgb * 2.0 + texture2D(tSrc, vUv + uTexel * vec2(0.0, 1.0)).rgb * 2.0;
+    c += texture2D(tSrc, vUv + uTexel * vec2(-1.0, -1.0)).rgb + texture2D(tSrc, vUv + uTexel * vec2(1.0, -1.0)).rgb + texture2D(tSrc, vUv + uTexel * vec2(-1.0, 1.0)).rgb + texture2D(tSrc, vUv + uTexel * vec2(1.0, 1.0)).rgb;
+    c += texture2D(tSrc, vUv).rgb * 4.0;
+    gl_FragColor = vec4(c / 16.0 + texture2D(tBase, vUv).rgb, 1.0);
+  }`, { tSrc: { value: null }, tBase: { value: null }, uTexel: { value: new V2() } });
+POST.focus = pmat(GLSL_POSTC + `
+  uniform sampler2D tPrev; uniform float uRate, uForce;
+  void main() {
+    float z = 1e9;
+    for (int i = 0; i < 9; i++) { vec2 o = vec2(float(i % 3) - 1.0, float(i / 3) - 1.0) * 0.012; float d = texture2D(tDepth, vec2(0.5) + o).r; if (d < 0.99999) z = min(z, linZ(d)); }
+    if (z > 1e8) z = 600.0;
+    float prev = texture2D(tPrev, vec2(0.5)).r; if (prev <= 0.0) prev = z;
+    gl_FragColor = vec4(uForce > 0.0 ? uForce : mix(prev, clamp(z, 0.3, 600.0), uRate), 0.0, 0.0, 1.0);
+  }`, { tPrev: { value: null }, uRate: { value: 0.1 }, uForce: { value: 0 } });
+POST.dof = pmat(GLSL_POSTC + GLSL_COC + `
+  uniform sampler2D tColor;
+  void main() {
+    float c0 = cocPx(linZ(texture2D(tDepth, vUv).r));
+    vec3 acc = texture2D(tColor, vUv).rgb; float w = 1.0;
+    float R = max(c0, 1.0);
+    for (int i = 0; i < 28; i++) {
+      float fi = float(i) + 0.5, r = sqrt(fi / 28.0) * R, a = fi * 2.39996;
+      vec2 o = vec2(cos(a), sin(a)) * r / uRes;
+      float cs = cocPx(linZ(texture2D(tDepth, vUv + o).r));
+      float ww = smoothstep(r - 1.5, r + 0.5, max(cs, c0 * step(cs, c0 * 4.0)));
+      acc += texture2D(tColor, vUv + o).rgb * ww; w += ww;
+    }
+    gl_FragColor = vec4(acc / w, c0);
+  }`, { tColor: { value: null } });
+POST.god = pmat(GLSL_POSTC + `
+  uniform sampler2D tCaustics; uniform vec3 uCamPos, uSunDirW, uSunColor, uAbsorb; uniform float uWaterY, uTime, uScatter;
+  void main() {
+    vec3 vp = viewPos(vUv); float L = min(length(vp), 24.0);
+    vec3 dir = normalize((uCamWorld * vec4(normalize(vp), 0.0)).xyz);
+    float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    vec3 ext = uAbsorb + vec3(uScatter); vec3 acc = vec3(0.0);
+    for (int i = 0; i < 16; i++) {
+      float t = (float(i) + j) / 16.0 * L; vec3 p = uCamPos + dir * t;
+      float dw = uWaterY - p.y; if (dw < 0.0) continue;
+      vec2 s = p.xz + uSunDirW.xz / max(uSunDirW.y, 0.25) * dw;
+      float a = texture2D(tCaustics, s * 0.21 + vec2(uTime * 0.019, uTime * 0.011)).r, b = texture2D(tCaustics, s.yx * vec2(0.27, -0.25) + vec2(-uTime * 0.015, uTime * 0.018)).r;
+      float shaft = pow(a * b * 3.0, 1.5);
+      acc += shaft * exp(-ext * (t + dw / max(uSunDirW.y, 0.2)));
+    }
+    gl_FragColor = vec4(acc / 16.0 * uSunColor * uScatter * 9.0 * L / 10.0, 1.0);
+  }`, { tCaustics: GU.tCaustics, uCamPos: { value: new V3() }, uSunDirW: GU.uSunDirW, uSunColor: GU.uSunColor, uAbsorb: GU.uAbsorb, uWaterY: GU.uWaterY, uTime: GU.uTime, uScatter: GU.uScatter });
+const compositeMat = pmat(GLSL_POSTC + GLSL_COC + GLSL_ACES + `
+  uniform sampler2D tColor, tAO, tBloom, tDof, tGod; uniform float uExposure, uVignette, uGrain, uSharpen, uBloom, uAOon, uDofOn, uGodOn, uTime, uDrops, uUnder, uHazeK;
+  uniform vec3 uGrade, uHaze; uniform vec2 uSunUV; uniform vec3 uSunCol;
+  vec2 dropOffset(vec2 uv, out float rim) {
+    rim = 0.0; if (uDrops < 0.01) return vec2(0.0);
+    vec2 g = uv * vec2(uRes.x / uRes.y, 1.0) * 7.0; vec2 id = floor(g); vec2 f = fract(g);
+    float h = ph(id), h2 = ph(id + 7.1);
+    vec2 c = vec2(0.3 + 0.4 * h, fract(0.8 - uTime * (0.03 + 0.08 * h2) * step(0.6, h2) + h2));
+    float r = 0.08 + 0.18 * h * h2; vec2 d = f - c; d.y *= 0.8; float l = length(d);
+    if (h > 0.55 || l > r) return vec2(0.0);
+    rim = smoothstep(r * 0.7, r, l);
+    return d / r * 0.02 * uDrops;
+  }
+  void main() {
+    float rim; vec2 uv = vUv + dropOffset(vUv, rim);
+    vec3 c = texture2D(tColor, uv).rgb;
+    float z = linZ(texture2D(tDepth, uv).r);
+    if (uAOon > 0.5) c *= mix(1.0, texture2D(tAO, uv).r, 0.85);
+    // lens sharpening (unsharp mask) where in focus
+    vec2 px = 1.0 / uRes;
+    vec3 nb = (texture2D(tColor, uv + vec2(px.x, 0.0)).rgb + texture2D(tColor, uv - vec2(px.x, 0.0)).rgb + texture2D(tColor, uv + vec2(0.0, px.y)).rgb + texture2D(tColor, uv - vec2(0.0, px.y)).rgb) * 0.25;
+    if (uAOon > 0.5) nb *= mix(1.0, texture2D(tAO, uv).r, 0.85);
+    float coc = uDofOn > 0.5 ? cocPx(z) : 0.0;
+    float sharpK = uSharpen * (1.0 - smoothstep(0.5, 1.5, coc));
+    c = max(c + (c - nb) * sharpK * 1.5 / (1.0 + dot(c, vec3(0.3))), vec3(0.0));
+    if (uDofOn > 0.5) c = mix(c, texture2D(tDof, uv).rgb, smoothstep(0.6, 2.2, coc));
+    if (uGodOn > 0.5) { vec2 gp = 2.0 / uRes; c += (texture2D(tGod, uv).rgb * 2.0 + texture2D(tGod, uv + gp * vec2(3.0, 1.0)).rgb + texture2D(tGod, uv - gp * vec2(3.0, 1.0)).rgb + texture2D(tGod, uv + gp * vec2(-1.0, 3.0)).rgb + texture2D(tGod, uv - gp * vec2(-1.0, 3.0)).rgb) / 6.0; }
+    c += texture2D(tBloom, uv).rgb * uBloom * 0.2;
+    // salt-haze veil toward the sun
+    vec2 sd = (vUv - uSunUV) * vec2(uRes.x / uRes.y, 1.0);
+    c += uSunCol * exp(-dot(sd, sd) * 5.0) * 0.06 * uHazeK;
+    c *= 1.0 - rim * 0.15;
+    c = c * uExposure / 0.6;
+    c = acesFilm(c) * uGrade;
+    vec2 q = vUv - 0.5; c *= 1.0 - uVignette * smoothstep(0.15, 0.85, dot(q, q) * 2.0);
+    c = toSRGB(clamp(c, 0.0, 1.0));
+    c += (ph(gl_FragCoord.xy + fract(uTime * 13.1) * 100.0) - 0.5) * uGrain * 2.0;
+    gl_FragColor = vec4(c, 1.0);
+  }`, {
+  tColor: { value: null }, tAO: { value: TX.white }, tBloom: { value: TX.black }, tDof: { value: TX.black }, tGod: { value: TX.black },
+  uExposure: { value: 0.9 }, uVignette: { value: 0.32 }, uGrain: { value: 0.01 }, uSharpen: { value: 0.35 }, uBloom: { value: 0.3 }, uAOon: { value: 1 }, uDofOn: { value: 1 }, uGodOn: { value: 0 },
+  uTime: GU.uTime, uDrops: { value: 0 }, uUnder: GU.uCamUnder, uHazeK: { value: 1 }, uGrade: { value: new V3(1, 1, 1) }, uHaze: { value: new C3() }, uSunUV: { value: new V2(-9, -9) }, uSunCol: { value: new C3() },
 });
+POST.copy = pmat(`uniform sampler2D tColor; varying vec2 vUv; void main(){ gl_FragColor = vec4(texture2D(tColor, vUv).rgb, 1.0); }`);
+const PRT = {};
+function onTargetsResized(w, h) {
+  for (const k in PRT) { if (Array.isArray(PRT[k])) PRT[k].forEach(r => r.dispose()); else PRT[k] && PRT[k].dispose && PRT[k].dispose(); }
+  const mk = (W, H, o = {}) => new THREE.WebGLRenderTarget(Math.max(1, W), Math.max(1, H), Object.assign({ type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false }, o));
+  const hw = w >> 1, hh = h >> 1;
+  PRT.ao = mk(hw, hh); PRT.aoBlur = mk(hw, hh); PRT.dof = mk(hw, hh); PRT.god = mk(hw >> 1, hh >> 1);
+  PRT.down = []; PRT.up = [];
+  for (let i = 0; i < 5; i++) { PRT.down.push(mk(hw >> i, hh >> i)); PRT.up.push(mk(hw >> i, hh >> i)); }
+  if (!PRT.focusA) { PRT.focusA = mk(1, 1, { type: THREE.FloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter }); PRT.focusB = mk(1, 1, { type: THREE.FloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter }); }
+  PU.uRes.value.set(w, h);
+}
 function drawPost(mat, target) { postQuad.material = mat; renderer.setRenderTarget(target); renderer.render(postScene, postCam); }
 const dbgView = { tex: null };
+const LENS = { drops: 0, focusForce: 0 };
 function runPost() {
-  compositeMat.uniforms.tColor.value = dbgView.tex ? (RT[dbgView.tex].texture || RT[dbgView.tex]) : RT.main.texture;
-  compositeMat.uniforms.uExposure.value = ENV.exposure * (P.exposure / 0.9);
-  compositeMat.uniforms.uGrade.value.copy(ENV.grade);
-  compositeMat.uniforms.uVignette.value = P.vignette;
+  const under = GU.uCamUnder.value > 0.5, low = P.quality === 'Low';
+  PU.tDepth.value = RT.main.depthTexture; PU.tColor.value = RT.main.texture;
+  PU.uProj.value.copy(camera.projectionMatrix); PU.uInvProj.value.copy(camera.projectionMatrixInverse); PU.uCamWorld.value.copy(camera.matrixWorld);
+  PU.uNear.value = camera.near; PU.uFar.value = camera.far;
+  PU.uFocal.value = 0.012 / Math.tan(camera.fov * DEG / 2);
+  PU.uFstop.value = under ? Math.min(P.fstop, 2.8) : P.fstop; PU.uMaxBokeh.value = P.maxBokeh;
+  const CU = compositeMat.uniforms;
+  // ssao (half res)
+  const aoOn = P.ssao && !under;
+  if (aoOn) {
+    PU.uRes.value.set(PRT.ao.width, PRT.ao.height); drawPost(POST.ssao, PRT.ao);
+    POST.blur.uniforms.tSrc.value = PRT.ao.texture; POST.blur.uniforms.uSrcRes.value.set(PRT.ao.width, PRT.ao.height); drawPost(POST.blur, PRT.aoBlur);
+    PU.uRes.value.set(RT.w, RT.h);
+  }
+  // bloom: prefilter + 5-level mip chain
+  POST.prefilter.uniforms.uThreshold.value = P.bloomThreshold; POST.prefilter.uniforms.uTexel.value.set(1 / RT.w, 1 / RT.h);
+  drawPost(POST.prefilter, PRT.down[0]);
+  for (let i = 1; i < 5; i++) { POST.down.uniforms.tSrc.value = PRT.down[i - 1].texture; POST.down.uniforms.uTexel.value.set(1 / PRT.down[i - 1].width, 1 / PRT.down[i - 1].height); drawPost(POST.down, PRT.down[i]); }
+  POST.copy.uniforms.tColor.value = PRT.down[4].texture; drawPost(POST.copy, PRT.up[4]);
+  for (let i = 3; i >= 0; i--) { POST.up.uniforms.tSrc.value = PRT.up[i + 1].texture; POST.up.uniforms.tBase.value = PRT.down[i].texture; POST.up.uniforms.uTexel.value.set(1 / PRT.up[i + 1].width, 1 / PRT.up[i + 1].height); drawPost(POST.up, PRT.up[i]); }
+  // autofocus: 1x1 ping-pong on the depth under the crosshair
+  POST.focus.uniforms.tPrev.value = PRT.focusA.texture; POST.focus.uniforms.uForce.value = LENS.focusForce; POST.focus.uniforms.uRate.value = 0.08;
+  drawPost(POST.focus, PRT.focusB); [PRT.focusA, PRT.focusB] = [PRT.focusB, PRT.focusA]; PU.tFocus.value = PRT.focusA.texture;
+  const dofOn = (P.dof || under) && !low;
+  if (dofOn) { POST.dof.uniforms.tColor.value = RT.main.texture; drawPost(POST.dof, PRT.dof); }
+  const godOn = under && P.godRays;
+  if (godOn) { POST.god.uniforms.uCamPos.value.copy(camera.position); drawPost(POST.god, PRT.god); }
+  // composite
+  CU.tColor.value = dbgView.tex ? (RT[dbgView.tex] ? (RT[dbgView.tex].texture || RT[dbgView.tex]) : PRT[dbgView.tex].texture) : RT.main.texture;
+  CU.tAO.value = aoOn ? PRT.aoBlur.texture : TX.white; CU.uAOon.value = aoOn ? 1 : 0;
+  CU.tBloom.value = PRT.up[0].texture; CU.uBloom.value = P.bloom * (1 + ENV.night * 1.6);
+  CU.tDof.value = PRT.dof.texture; CU.uDofOn.value = dofOn ? 1 : 0;
+  CU.tGod.value = PRT.god.texture; CU.uGodOn.value = godOn ? 1 : 0;
+  CU.uExposure.value = ENV.exposure * (P.exposure / 0.9);
+  CU.uGrade.value.copy(ENV.grade); CU.uVignette.value = P.vignette; CU.uGrain.value = P.grain; CU.uSharpen.value = P.sharpen;
+  LENS.drops = Math.max(0, LENS.drops - 1 / 60 * 0.25); CU.uDrops.value = Math.max(LENS.drops, ENV.rain * 0.5 * smoothstep(0.8, 1.3, ENV.swell));
+  const sp = tmpV.copy(GU.uSunDir.value).multiplyScalar(1000).add(camera.position).project(camera);
+  CU.uSunUV.value.set(sp.z < 1 ? sp.x * 0.5 + 0.5 : -9, sp.y * 0.5 + 0.5); CU.uSunCol.value.copy(GU.uSunColor.value); CU.uHazeK.value = under ? 0 : (1 - ENV.night) * (1 - ENV.overcast);
   drawPost(compositeMat, null);
 }
 
