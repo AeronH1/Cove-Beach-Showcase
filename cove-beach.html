@@ -274,10 +274,11 @@ function buildBaseTextures() {
     TX.rock = dataTex(N, (x, y, c) => {
       const u = x / N, v = y / N;
       const n = tfbm(u * 6, v * 6, 6, 5), n2 = tfbm(u * 24, v * 24, 24, 3);
-      const [f1, f2] = tworley(u * 7, v * 7, 7, 3), crack = smoothstep(0.0, 0.07, f2 - f1);
+      const wu = u + 0.06 * tfbm(u * 5, v * 5, 5, 3), wv = v + 0.06 * tfbm(u * 5 + 3, v * 5, 5, 3);
+      const [f1, f2] = tworley(wu * 5, wv * 5, 5, 3), crack = smoothstep(0.0, 0.035, f2 - f1) * 0.6 + 0.4 * smoothstep(-0.2, 0.2, tfbm(u * 12, v * 12, 12, 2) + 0.6);
       const band = 0.5 + 0.5 * Math.sin((v * 10 + n * 0.8) * TAU);
       let r = 176 + 30 * n + 14 * band, g = 160 + 26 * n + 10 * band, b = 136 + 20 * n;
-      const k = (0.75 + 0.25 * crack) * (0.92 + 0.08 * n2); r *= k; g *= k; b *= k;
+      const k = (0.86 + 0.14 * crack) * (0.9 + 0.1 * n2); r *= k; g *= k; b *= k;
       if (hash2(x, y) > 0.992) { r *= 0.6; g *= 0.6; b *= 0.6; }
       c[0] = r; c[1] = g; c[2] = b; c[3] = crack * 255;
       H[y * N + x] = n * 0.6 + n2 * 0.25 + crack * 0.5 + 0.12 * hash2(x + 7, y);
@@ -811,10 +812,11 @@ float pm_sandW = 0.0;
     pm_rock *= tint;
     float below = smoothstep(pm_hi + 0.25, pm_hi - 0.15, vWPos.y + (pm_n1 - 0.5) * 0.5);
     float algae = smoothstep(uWaterY + 0.15, uWaterY - 0.35, vWPos.y + (pm_n1 - 0.5) * 0.6) * smoothstep(0.1, 0.6, pm_wN.y + 0.6);
-    float barn = step(0.8, pm_h12(floor(vWPos.xz * 38.0 + vWPos.y * 21.0))) * below * (1.0 - algae);
+    vec2 bq = vWPos.xz * 42.0 + vWPos.y * 23.0;
+    float barn = step(0.9, pm_h12(floor(bq))) * smoothstep(0.34, 0.18, length(fract(bq) - 0.5)) * below * (1.0 - algae) * smoothstep(0.0, 0.5, pm_wN.y + 0.3) * (1.0 - smoothstep(4.0, 12.0, pm_camDist));
     pm_rock *= mix(1.0, 0.52, below);
     pm_rock = mix(pm_rock, vec3(0.14, 0.2, 0.07), algae * 0.8);
-    pm_rock = mix(pm_rock, vec3(0.78, 0.76, 0.7), barn * 0.7);
+    pm_rock = mix(pm_rock, vec3(0.72, 0.7, 0.64), barn * 0.55);
     float salt = smoothstep(pm_hi + 0.6, pm_hi + 2.2, vWPos.y) * smoothstep(0.55, 0.8, texture2D(tRockA, vWPos.xz * 0.9).a < 0.5 ? 1.0 : pm_n1) * (1.0 - uRain);
     pm_rock = mix(pm_rock, vec3(0.93, 0.92, 0.88), salt * 0.18);
     pm_wet = max(pm_wet, below);
@@ -837,7 +839,11 @@ float pm_sandW = 0.0;
 #endif
 #ifdef SAND
   pm_sandW = 1.0;
-  diffuseColor.rgb *= texture2D(tSandA, vWPos.xz * 0.43).rgb;
+  {
+    vec3 sw3 = pow(abs(pm_wN), vec3(4.0)); sw3 /= dot(sw3, vec3(1.0));
+    vec3 p3 = vWPos * 0.43;
+    diffuseColor.rgb *= texture2D(tSandA, p3.zy).rgb * sw3.x + texture2D(tSandA, p3.xz).rgb * sw3.y + texture2D(tSandA, p3.xy).rgb * sw3.z;
+  }
 #endif
 #if defined(SAND) || defined(TERRAIN)
   {
@@ -889,7 +895,7 @@ const GLSL_NORMAL = `
     float r1 = dot(vWPos.xz, wd) * 6.5 + nn * 2.0;
     float r2 = vWPos.z * 4.2 + nn * 1.5 + sin(vWPos.x * 0.7) * 0.8 + sin(uTime * 0.0) ;
     vec2 rg = wd * cos(r1) * 0.28 * dry + vec2(0.0, 1.0) * cos(r2) * 0.22 * sub;
-    vec2 gg = (g.xy * 0.45 + rg) * fade * pm_sandW;
+    vec2 gg = (g.xy * 0.45 + rg) * fade * pm_sandW * smoothstep(0.4, 0.85, wn.y);
     wn = normalize(wn + vec3(gg.x, 0.0, gg.y));
     changed = true;
     // grain glints
@@ -897,7 +903,7 @@ const GLSL_NORMAL = `
     float h1 = pm_h12(cell), h2 = pm_h12(cell + 17.0), h3 = pm_h12(cell + 41.0);
     vec3 fn = normalize(vec3(h1 - 0.5, 0.9, h2 - 0.5));
     vec3 Hh = normalize(uSunDir + normalize(cameraPosition - vWPos));
-    pm_spark = step(0.55, h3) * smoothstep(0.985, 0.999, dot(fn, Hh)) * (1.0 - smoothstep(4.0, 16.0, pm_camDist)) * (1.0 - pm_wet * 0.7) * (1.0 - sub);
+    pm_spark = step(0.9, h3) * smoothstep(0.99, 0.999, dot(fn, Hh)) * 0.6 * (1.0 - smoothstep(4.0, 16.0, pm_camDist)) * (1.0 - pm_wet * 0.7) * (1.0 - sub);
   }
 #endif
   if (changed) normal = normalize((viewMatrix * vec4(wn, 0.0)).xyz);
@@ -942,7 +948,7 @@ const GLSL_FOG = `
   if (vWPos.y < uWaterY - 0.02) {
     if (uCamUnder > 0.5) { vec3 T = exp(-(uAbsorb + vec3(uScatter)) * pm_d * 1.2); gl_FragColor.rgb = gl_FragColor.rgb * T + uInscatter * (1.0 - T); }
   } else {
-    float fd = uFogDensity * pm_d * exp(-max(vWPos.y - uWaterY, 0.0) * 0.012);
+    float fd = uFogDensity * max(pm_d - 12.0, 0.0) * exp(-max(vWPos.y - uWaterY, 0.0) * 0.012);
     vec3 fc = uFogColor + uSunColor * pow(max(dot(normalize(vWPos - cameraPosition), uSunDir), 0.0), 8.0) * 0.35 * (1.0 - uNight);
     gl_FragColor.rgb = mix(gl_FragColor.rgb, fc, 1.0 - exp(-fd * fd));
   }
@@ -1355,6 +1361,7 @@ function buildRocks() {
   const VAR = 6, geos = [], mats = Array.from({ length: VAR }, () => []);
   for (let i = 0; i < VAR; i++) geos.push(rockGeo(i + 1, 3, 0.25 + 0.1 * i % 3));
   const place = (x, z, s, sy = 1, yOff = null, rotY = rand(0, TAU)) => {
+    if (Math.hypot(x - 41.2, z - 15.5) < 6.5 + s) return;            // keep the tide-pool shelf clear
     const gy = groundAt(x, z), y = yOff === null ? gy + s * sy * 0.25 : yOff;
     const v = Math.floor(rand(0, VAR));
     mats[v].push(mtx([x, y, z], [rand(-0.2, 0.2), rotY, rand(-0.2, 0.2)], [s * rand(0.8, 1.3), s * sy, s * rand(0.8, 1.3)]));
@@ -1401,7 +1408,7 @@ function buildTidePools() {
   }
   g.computeVertexNormals(); colorGeo(g, 0xdddddd);
   const m = meshOf(g, rockMat, L_BOTH); m.position.copy(C); m.rotation.y = ang; cliffGroup.add(m); m.updateMatrixWorld();
-  const poolMat = new THREE.MeshStandardMaterial({ color: 0x9fd8d0, transparent: true, opacity: 0.32, roughness: 0.03, metalness: 0, envMapIntensity: 1.3, depthWrite: false });
+  const poolMat = new THREE.MeshPhysicalMaterial({ color: 0x5fa8a2, transparent: true, opacity: 0.16, roughness: 0.02, metalness: 0, envMapIntensity: 1.6, clearcoat: 1, clearcoatRoughness: 0.02, depthWrite: false });
   for (const [px, pz, rx, rz] of pools) {
     const wg = new THREE.CircleGeometry(1, 28); wg.rotateX(-Math.PI / 2); wg.scale(rx * 0.95, 1, rz * 0.95);
     const wm = new THREE.Mesh(wg, poolMat); wm.layers.set(L_ABOVE); wm.renderOrder = 6;
@@ -1771,8 +1778,8 @@ function frondGeo(len = 4.3, pairs = 30, droop = 0.55) {
 }
 function barkTex() {
   return dataTex(256, (x, y, c) => {
-    const v = y / 256, u = x / 256, ring = Math.pow(Math.abs(Math.sin(v * Math.PI * 8 + tnoise(u * 8, v * 8, 8) * 0.4)), 12);
-    const fib = tnoise(u * 64, v * 4, 64) * 0.5 + 0.5, n = tfbm(u * 8, v * 8, 8, 3);
+    const v = y / 256, u = x / 256, ring = Math.pow(Math.abs(Math.sin(u * Math.PI * 8 + tnoise(u * 8, v * 8, 8) * 0.4)), 12);
+    const fib = tnoise(u * 4, v * 64, 64) * 0.5 + 0.5, n = tfbm(u * 8, v * 8, 8, 3);
     const k = (0.62 + 0.18 * fib + 0.1 * n) * (1 - ring * 0.45);
     c[0] = 150 * k; c[1] = 132 * k; c[2] = 108 * k;
   }, { srgb: true });
@@ -2014,8 +2021,16 @@ function buildDecorations() {
       const q = A.clone().addScaledVector(dir, u * len).addScaledVector(side, w); q.y -= sag; p.setXYZ(k, q.x, q.y, q.z); uvs.setXY(k, u * 6, v * 1.5);
     }
     hg.computeVertexNormals(); setAttr(hg, 'aSway', 1, v => 0.15);
-    const netTex = canvasTex(128, 128, (g, W, H) => { g.clearRect(0, 0, W, H); g.strokeStyle = '#efe4cc'; g.lineWidth = 7; for (let i = -2; i < 4; i++) { g.beginPath(); g.moveTo(i * 43, 0); g.lineTo(i * 43 + 128, 128); g.stroke(); g.beginPath(); g.moveTo(i * 43 + 128, 0); g.lineTo(i * 43, 128); g.stroke(); } }, { repeat: true });
-    const hm = stdMat({ map: netTex, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.9 }, { fabric: true, trans: 0.4, sway: true, swayAmp: 0.4 });
+    // woven cotton hammock: warp stripes with a basket-weave texture and a fringe of open weave at the ends
+    const weaveTex = canvasTex(256, 256, (g, W, H) => {
+      const cols = ['#efe6d2', '#efe6d2', '#c8553d', '#efe6d2', '#2f7f8a', '#efe6d2', '#e3a33b', '#efe6d2'];
+      for (let i = 0; i < 16; i++) { g.fillStyle = cols[i % cols.length]; g.fillRect(0, i * H / 16, W, H / 16 + 1); }
+      for (let y = 0; y < H; y += 4) for (let x = 0; x < W; x += 4) { const o = ((x + y) / 4) % 2; g.fillStyle = o ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.08)'; g.fillRect(x, y, 4, 2); }
+    }, { repeat: true });
+    for (let k = 0; k < uvs.count; k++) uvs.setXY(k, uvs.getX(k) / 6 * 3, uvs.getY(k) / 1.5);
+    const hm = physMat({ map: weaveTex, side: THREE.DoubleSide, roughness: 0.9, sheen: 0.6, sheenColor: new C3(1, 1, 1) }, { fabric: true, trans: 0.5, sway: true, swayAmp: 0.4 });
+    const hr = [ropeBetween(A, A.clone().addScaledVector(dir, len * 0.1).add(new V3(0, -0.1, 0)), 0.02, 0.012, 4), ropeBetween(B, B.clone().addScaledVector(dir, -len * 0.1).add(new V3(0, -0.1, 0)), 0.02, 0.012, 4)];
+    grp.add(meshOf(mergeGeos(hr), MAT.rope, L_ABOVE, { cast: false }));
     grp.add(meshOf(hg, hm));
     DECOR.hammock = { A, B };
   }
@@ -2252,7 +2267,7 @@ float shorePhase(vec2 p, float h) {
   float tau = xo < xd ? 2.0 * sqrt(xo / (9.81 * slope)) : 2.0 * sqrt(xd / (9.81 * slope)) + (xo - xd) / sqrt(9.81 * hd);
   return (uTime + tau) / uShoreT + 0.13 * sin(p.x * 0.105) + 0.07 * sin(p.x * 0.29 + 1.3) + p.x * 0.0035;
 }
-float waveAmp(float n) { return uSwell * 0.36 * (0.68 + 0.64 * sw_h(n)) * (0.78 + 0.22 * sin(n * 0.83)); }
+float waveAmp(float n) { return uSwell * 0.62 * (0.68 + 0.64 * sw_h(n)) * (0.78 + 0.22 * sin(n * 0.83)); }
 // eta: elevation offset, brk: 0..1 breaking, level: swash run-up level (absolute), front: 0..1 on the front face near the crest
 void shoreWave(vec2 p, float terr, float beach, out float eta, out float brk, out float level, out float front) {
   eta = 0.0; brk = 0.0; front = 0.0; level = -99.0;
@@ -2468,11 +2483,12 @@ void main() {
   float spec = (ggx(NdH, 0.06) * 0.85 + ggx(NdH, 0.2) * 0.15) * Fs / (4.0 * max(NdV, 0.15)) * step(0.0, NdL);
   col += uSunColor * 3.6 * min(spec, 60.0) * sh * (1.0 - foam);
   // bioluminescence where water is disturbed at night
-  float dist2 = abs(rippleAt(P.xz)) * 25.0 + fd * 0.8 + vBrk * vFront;
+  float dist2 = abs(rippleAt(P.xz)) * 25.0 + fw.r * 0.7 + vBrk * vFront * 1.2 + lace * 0.25;
   float spark = smoothstep(0.55, 0.9, texture2D(tFoamTex, P.xz * 1.9 + vec2(uTime * 0.07, -uTime * 0.05)).r);
-  col += vec3(0.04, 0.42, 1.0) * uBiolum * uNight * clamp(dist2, 0.0, 1.5) * (0.25 + spark * 1.4) * 1.2;
+  float flick = 0.6 + 0.4 * sin(uTime * 3.0 + P.x * 1.7 + P.z * 1.3);
+  col += vec3(0.04, 0.42, 1.0) * uBiolum * uNight * clamp(dist2, 0.0, 1.5) * (0.12 + spark * 1.3 * flick) * 0.9;
   // atmospheric fog
-  float fdn = uFogDensity * dist;
+  float fdn = uFogDensity * max(dist - 12.0, 0.0);
   vec3 fc = uFogColor + uSunColor * pow(max(dot(-V, uSunDir), 0.0), 8.0) * 0.35 * (1.0 - uNight);
   col = mix(col, fc, 1.0 - exp(-fdn * fdn));
   gl_FragColor = vec4(col, 1.0);
@@ -2557,7 +2573,7 @@ function buildSims() {
         vec4 p = texture2D(tPrev, vUv - vel * uDt * uDom.w);
         float foam = p.r * exp(-uDt / mix(5.0, 2.2, brk));
         vec3 gn; float jac; vec3 dsp = gerstner(xz, swellAtt(xz, m, h), 0.0, gn, jac);
-        float src = brk * front * front * 1.5 + brk * 0.04;
+        float src = brk * front * 2.6 + brk * 0.1;
         if (level > terr && level - terr < 0.05) src += 0.8;
         src += smoothstep(0.75, 0.35, jac) * smoothstep(0.3, 0.85, uWind) * 0.9;
         src += (1.0 - m.g) * exp(-abs(m.r + 0.8) / 1.6) * smoothstep(-0.02, 0.1, dsp.y) * (0.4 + uSwell) * 2.2 * step(0.0, h);
@@ -2643,7 +2659,7 @@ function waterHeightAt(x, z, t = GU.uTime.value) {
   let y = GU.uWaterY.value + _g.y;
   if (m.beach > 0.02) {
     const h = depth, ph = shorePhaseCPU(x, h, t), n = Math.floor(ph), w = ph - n;
-    const amp = nn => ENV.swell * 0.36 * (0.68 + 0.64 * swH(nn)) * (0.78 + 0.22 * Math.sin(nn * 0.83));
+    const amp = nn => ENV.swell * 0.62 * (0.68 + 0.64 * swH(nn)) * (0.78 + 0.22 * Math.sin(nn * 0.83));
     const A = lerp(amp(n), amp(n + 1), smoothstep(0.25, 0.8, w)), hs = Math.max(h, 0);
     const Hs = A * Math.pow(3.2 / Math.max(hs, 0.18), 0.25), Hb = 0.82 * hs + 0.004, brk = smoothstep(0.7, 1.08, Hs / Hb), H = Math.min(Hs, Hb);
     const fr = lerp(0.32, 0.075, brk);
@@ -2658,7 +2674,7 @@ function breakerCPU(x, z, t) {       // breaking intensity at a point (for audio
   const m = maskSample(x, z), h = GU.uWaterY.value - groundAt(x, z);
   if (m.beach < 0.05 || h <= 0) return 0;
   const ph = shorePhaseCPU(x, h, t), n = Math.floor(ph);
-  const A = ENV.swell * 0.36 * (0.68 + 0.64 * swH(n + 1)), Hs = A * Math.pow(3.2 / Math.max(h, 0.18), 0.25);
+  const A = ENV.swell * 0.62 * (0.68 + 0.64 * swH(n + 1)), Hs = A * Math.pow(3.2 / Math.max(h, 0.18), 0.25);
   return smoothstep(0.7, 1.08, Hs / (0.82 * h + 0.004)) * m.beach;
 }
 
@@ -4013,7 +4029,7 @@ function updateAudio(dt) {
     for (const dx of [-8, 0, 8]) {
       const x = Math.round((cam.x + dx) / 8) * 8, z = findBeachZ(x, -6); if (z === null) continue;
       const ph = shorePhaseCPU(x, 1.0, GU.uTime.value), n = Math.floor(ph);
-      if (AU.lastBreak[x] !== n && ph - n > 0.02 && ph - n < 0.2) { AU.lastBreak[x] = n; const amp = clamp(ENV.swell * 0.36 * (0.68 + 0.64 * swH(n)) * 3, 0.2, 2); audioEvent('crash', V(x, 0, z), amp); }
+      if (AU.lastBreak[x] !== n && ph - n > 0.02 && ph - n < 0.2) { AU.lastBreak[x] = n; const amp = clamp(ENV.swell * 0.62 * (0.68 + 0.64 * swH(n)) * 2, 0.2, 2); audioEvent('crash', V(x, 0, z), amp); }
     }
   }
   set(L.wind, (0.05 + 0.35 * ENV.wind + 0.3 * GU.uGust.value) * (under ? 0.2 : 1));
@@ -4258,7 +4274,7 @@ function updateUI(rdt) {
   const nowT = performance.now(), real = (nowT - QA.lastT) / 1000; QA.lastT = nowT;
   QA.acc += real; QA.n++; QA.t += real;
   if (QA.t > 0.5) { const ms = QA.acc / QA.n * 1000; $('hud-fps').textContent = Math.round(1000 / ms); $('hud-ms').textContent = ms.toFixed(1) + ' ms'; stats.fps = 1000 / ms; stats.ms = ms; QA.t = 0; QA.acc = 0; QA.n = 0;
-    if (P.autoDrop && real < 0.25) {
+    if (P.autoDrop && real < 0.1 && document.visibilityState === 'visible' && document.hasFocus() && performance.now() - T0 > 15000) {
       if (ms > 22) QA.slow += 0.5; else QA.slow = Math.max(0, QA.slow - 0.25);
       if (ms < 12) QA.fast += 0.5; else QA.fast = 0;
       if (QA.slow >= 1.5) { QA.slow = 0; if (resScale > 0.62) { resScale = Math.max(0.6, +(resScale - 0.1).toFixed(2)); makeTargets(); refreshUI(); } else if (P.quality === 'High') { setQuality('Low'); toast('Quality lowered to keep it smooth'); } }
