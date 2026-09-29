@@ -431,6 +431,7 @@ const GU = {
   uHighTide: { value: 0.3 },
   // night lamps (lanterns, torches, string lights): xyz + range, rgb * intensity; evaluated by every material
   uLampPos: { value: Array.from({ length: 24 }, () => new V4(0, -99, 0, 0)) }, uLampCol: { value: Array.from({ length: 24 }, () => new V4()) }, uLampOn: { value: 0 },
+  uTLampPos: { value: Array.from({ length: 16 }, () => new V4(0, -99, 0, 0)) }, uTLampCol: { value: Array.from({ length: 16 }, () => new V4()) }, uTownBox: { value: new V4(0, -1, 0, -1) }, uTownOn: { value: 0 },
 };
 
 // ---- sky: Preetham (after three.js Sky.js) + cumulus deck + marine haze + moon/stars
@@ -749,6 +750,7 @@ const GLSL_FRAG_PARS = `
 uniform sampler2D tCaustics, uSwash;
 uniform vec4 uFishA[${MAX_FISH}], uFishB[${MAX_FISH}], uFloatA[4];
 uniform vec4 uLampPos[24], uLampCol[24]; uniform float uLampOn;
+uniform vec4 uTLampPos[16], uTLampCol[16], uTownBox; uniform float uTownOn;
 #ifdef TERRAIN
 varying vec4 vSplat;
 #endif
@@ -760,6 +762,19 @@ vec3 lampLight(vec3 p, vec3 n) {
     float dist = sqrt(d2), win = pow(clamp(1.0 - pow(dist / lp.w, 4.0), 0.0, 1.0), 2.0);
     float ndl = max(dot(n, d / dist), 0.0) * 0.85 + 0.15;
     sum += uLampCol[i].rgb * ndl * win / (d2 + 0.5);
+  }
+  return sum;
+}
+// village street lamps: inverse-square with a smooth cut-off, lit from the lantern down (its cap shades what's above)
+vec3 townLight(vec3 p, vec3 n) {
+  if (p.x < uTownBox.x || p.x > uTownBox.y || p.z < uTownBox.z || p.z > uTownBox.w) return vec3(0.0);
+  vec3 sum = vec3(0.0);
+  for (int i = 0; i < 16; i++) {
+    vec4 lp = uTLampPos[i]; if (lp.w <= 0.0) continue;
+    vec3 d = lp.xyz - p; float d2 = dot(d, d); if (d2 > lp.w * lp.w) continue;
+    float dist = sqrt(d2), win = pow(clamp(1.0 - pow(dist / lp.w, 4.0), 0.0, 1.0), 2.0);
+    float ndl = max(dot(n, d / dist) * 0.92 + 0.08, 0.0), cap = mix(1.0, 0.12, smoothstep(0.1, 0.45, -d.y));
+    sum += uTLampCol[i].rgb * ndl * win * cap / (d2 + 0.35);
   }
   return sum;
 }
@@ -975,6 +990,7 @@ const GLSL_POSTLIGHT = `
 reflectedLight.directSpecular *= pm_specK; reflectedLight.indirectSpecular *= pm_specK;
 reflectedLight.directSpecular += pm_sunLit * pm_spark * 6.0;
 if (uLampOn > 0.001 && pm_dw < 0.3) reflectedLight.directDiffuse += diffuseColor.rgb * lampLight(vWPos, normalize((vec4(normal, 0.0) * viewMatrix).xyz)) * uLampOn;
+if (uTownOn > 0.001) reflectedLight.directDiffuse += diffuseColor.rgb * townLight(vWPos, normalize((vec4(normal, 0.0) * viewMatrix).xyz));
 #if defined(FROND) || defined(FABRIC)
 {
   vec3 Lv = normalize((viewMatrix * vec4(uSunDir, 0.0)).xyz);
@@ -2107,10 +2123,19 @@ function buildTown() {
     for (let i = 0; i <= n; i++) {
       const t = (i + 0.5) / (n + 1), p = cv.getPointAt(t), tg = cv.getTangentAt(t), side = i % 2 ? 1 : -1, x = p.x - tg.z * off * side, z = p.z + tg.x * off * side, y = groundAt(x, z) - 0.1;
       if (Math.hypot(x - plaza.x, z - plaza.z) < plaza.r + 0.5 || TOWN.houses.some(hh => Math.hypot(hh.x - x, hh.z - z) < Math.max(hh.w, hh.d) / 2 + 0.6)) continue;
-      OUT.M.push(xform(new THREE.CylinderGeometry(0.05, 0.08, 3.4, 8), { p: [x, y + 1.7, z] }), xform(new THREE.CylinderGeometry(0.12, 0.14, 0.4, 8), { p: [x, y + 0.2, z] }));
-      OUT.M.push(xform(new THREE.ConeGeometry(0.26, 0.22, 6), { p: [x, y + 3.68, z] }), box(0.26, 0.05, 0.26, [x, y + 3.18, z]));
-      LAMPG.push(xform(new THREE.CylinderGeometry(0.17, 0.12, 0.38, 6), { p: [x, y + 3.38, z] }));
-      lampHeads.push(new V3(x, y + 3.38, z));
+      if (lampHeads.length >= 16) break;
+      // cast-iron post: moulded base, tapered fluted shaft, collar; a lantern of frosted panes in a square cage under a cap
+      const k = lampHeads.length, yb = y + 3.55, yt = y + 4.0, hb = 0.1, ht = 0.155;
+      OUT.M.push(xform(lathe([[0.001, 0], [0.17, 0], [0.17, 0.07], [0.13, 0.12], [0.115, 0.38], [0.15, 0.43], [0.15, 0.47], [0.085, 0.55], [0.001, 0.55]], 12), { p: [x, y, z] }));
+      OUT.M.push(xform(new THREE.CylinderGeometry(0.042, 0.068, 3.0, 10), { p: [x, y + 2.0, z] }), xform(new THREE.CylinderGeometry(0.075, 0.055, 0.12, 10), { p: [x, y + 3.46, z] }), xform(new THREE.TorusGeometry(0.06, 0.014, 6, 12), { p: [x, y + 3.2, z], r: [Math.PI / 2, 0, 0] }));
+      OUT.M.push(box(2 * hb + 0.07, 0.04, 2 * hb + 0.07, [x, yb - 0.02, z]), box(2 * ht + 0.05, 0.03, 2 * ht + 0.05, [x, yt + 0.015, z]));
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) OUT.M.push(tubeAlong([new V3(x + sx * hb, yb, z + sz * hb), new V3(x + sx * ht, yt, z + sz * ht)], 0.011, 5, 2));
+      OUT.M.push(xform(new THREE.ConeGeometry(ht * 1.6, 0.2, 4, 1), { p: [x, yt + 0.13, z], r: [0, Math.PI / 4, 0] }), xform(new THREE.SphereGeometry(0.032, 8, 6), { p: [x, yt + 0.26, z] }), xform(new THREE.CylinderGeometry(0.012, 0.02, 0.06, 6), { p: [x, yt + 0.22, z] }));
+      for (const [ox, oz] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {   // four frosted panes, brighter low down where the bulb sits
+        const px = oz === 0 ? 0 : 1, pz = ox === 0 ? 0 : 1, pts = [new V3(x + ox * hb - px * hb, yb, z + oz * hb - pz * hb), new V3(x + ox * hb + px * hb, yb, z + oz * hb + pz * hb), new V3(x + ox * ht + px * ht, yt, z + oz * ht + pz * ht), new V3(x + ox * ht - px * ht, yt, z + oz * ht - pz * ht)];
+        const g = facet(pts, new V3(ox, 0, oz)); setAttr(g, 'aLamp', 1, () => k); setAttr(g, 'aGlow', 1, v => lerp(1.15, 0.7, (v.y - yb) / (yt - yb))); LAMPG.push(g);
+      }
+      lampHeads.push(new V3(x, (yb + yt) / 2 - 0.03, z));
     }
   }
   // one draw per material
@@ -2121,15 +2146,28 @@ function buildTown() {
   const metalMat = stdMat({ color: 0x2b2d30, roughness: 0.45, metalness: 0.7 }, {});
   TOWN.litMat = stdMat({ color: 0x26343c, roughness: 0.12, metalness: 0.3, emissive: 0xffb45e, emissiveIntensity: 0 }, {});
   TOWN.darkMat = stdMat({ color: 0x1d2a31, roughness: 0.1, metalness: 0.35 }, {});
-  TOWN.lampMat = stdMat({ color: 0xfff0d0, roughness: 0.2, emissive: 0xffc070, emissiveIntensity: 0 }, {});
+  TOWN.lampOn = { value: new Array(16).fill(0) };
+  TOWN.lampMat = stdMat({ color: 0xf4e8d4, roughness: 0.35, emissive: 0xffc27a, emissiveIntensity: 2.4 }, {
+    uniforms: { uTOn: TOWN.lampOn }, vtxPars: 'attribute float aLamp; attribute float aGlow; uniform float uTOn[16]; varying float vLampGlow;\n',
+    vtx: 'vLampGlow = uTOn[int(aLamp + 0.5)] * aGlow;', fragPars: 'varying float vLampGlow;\n', post: 'totalEmissiveRadiance *= vLampGlow;', key: 'townlamp' });
   const grp = new THREE.Group(); scene.add(grp);
   grp.add(meshOf(worldUV(merge(OUT.W), 2.2), wallMat), meshOf(merge(OUT.R), roofMat), meshOf(merge(OUT.T), trimMat), meshOf(merge(OUT.M), metalMat),
-    meshOf(merge(OUT.GL), TOWN.litMat, L_ABOVE, { cast: false }), meshOf(merge(OUT.GD), TOWN.darkMat, L_ABOVE, { cast: false }), meshOf(merge(LAMPG), TOWN.lampMat, L_ABOVE, { cast: false }));
-  // warm pools of lamplight on the ground (additive, faded in with the lamps)
-  const poolTex = canvasTex(128, 128, (g, w, h) => { const r = g.createRadialGradient(64, 64, 0, 64, 64, 64); r.addColorStop(0, 'rgba(255,190,110,1)'); r.addColorStop(0.35, 'rgba(255,170,90,0.45)'); r.addColorStop(1, 'rgba(255,150,70,0)'); g.fillStyle = r; g.fillRect(0, 0, w, h); });
-  TOWN.poolMat = new THREE.MeshBasicMaterial({ map: poolTex, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
-  const pools = mergeGeos(lampHeads.map(p => { const g = drapeDisc(p.x, p.z, 4.2, 0.16), uv = g.attributes.uv, q = g.attributes.position; for (let i = 0; i < q.count; i++) uv.setXY(i, (q.getX(i) - p.x) / 8.4 + 0.5, (q.getZ(i) - p.z) / 8.4 + 0.5); return g; }), ['position', 'normal', 'uv']);
-  const pm = new THREE.Mesh(pools, TOWN.poolMat); pm.layers.set(L_ABOVE); pm.renderOrder = 7; scene.add(pm);
+    meshOf(merge(OUT.GL), TOWN.litMat, L_ABOVE, { cast: false }), meshOf(merge(OUT.GD), TOWN.darkMat, L_ABOVE, { cast: false }), meshOf(mergeGeos(LAMPG, ['position', 'normal', 'uv', 'aLamp', 'aGlow']), TOWN.lampMat, L_ABOVE, { cast: false }));
+  // each lamp is a real light source (see townLight): slightly different colour temperatures, switching on one by one at dusk
+  TOWN.lampInfo = lampHeads.map(() => ({ thr: rand(0.05, 0.3), delay: rand(0, 3), wait: 0, col: new V3(1, rand(0.66, 0.76), rand(0.36, 0.48)).multiplyScalar(rand(4.2, 5.2)), on: 0 }));
+  lampHeads.forEach((p, i) => GU.uTLampPos.value[i].set(p.x, p.y, p.z, 13));
+  { let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; lampHeads.forEach(p => { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }); GU.uTownBox.value.set(x0 - 13, x1 + 13, z0 - 13, z1 + 13); }
+  // a soft halo around each lantern: the glow of humid night air, drawn in front of the lantern
+  const haloMat = new THREE.ShaderMaterial({
+    uniforms: { uTint: { value: new C3(1.0, 0.72, 0.45) } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `varying vec2 vUv; varying float vOn, vFade; void main(){ vUv = uv; float s = length(instanceMatrix[0].xyz); vOn = s / 1.8;
+      vec4 c = modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0); float dist = length(c.xyz); vFade = exp(-dist * 0.012);
+      c.xyz += normalize(-c.xyz) * 0.35; gl_Position = projectionMatrix * (c + vec4(position.xy * 1.8, 0.0, 0.0)); }`,
+    fragmentShader: `uniform vec3 uTint; varying vec2 vUv; varying float vOn, vFade; void main(){ float r = length(vUv - 0.5) * 2.0;
+      float g = (exp(-r * r * 9.0) * 0.55 + exp(-r * r * 2.2) * 0.12) * smoothstep(1.0, 0.6, r); gl_FragColor = vec4(uTint * g * vOn * vFade, 1.0); }`,
+  });
+  TOWN.halos = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), haloMat, lampHeads.length); TOWN.halos.layers.set(L_ABOVE); TOWN.halos.frustumCulled = false; TOWN.halos.renderOrder = 8;
+  lampHeads.forEach((p, i) => TOWN.halos.setMatrixAt(i, mtx([p.x, p.y, p.z], [0, 0, 0], 0))); scene.add(TOWN.halos);
   TOWN.group = grp; TOWN.lamps = lampHeads; TOWN.street = street; TOWN.lane = lane; TOWN.plaza = plaza;
   rng = savedRng;
 }
@@ -2967,7 +3005,19 @@ function updateDecor(dt, t) {
   if (DECOR.bulbMat) DECOR.bulbMat.emissiveIntensity = L * 9; if (DECOR.lanternMat) DECOR.lanternMat.emissiveIntensity = L * 6; if (DECOR.flameMat) DECOR.flameMat.uniforms.uOn.value = smoothstep(0.05, 0.4, L);
   // lamps: all on together at dusk and night; torches flicker
   GU.uLampOn.value = smoothstep(0.02, 0.35, L);
-  if (TOWN.litMat) { TOWN.litMat.emissiveIntensity = smoothstep(0.02, 0.5, L) * 2.2; TOWN.lampMat.emissiveIntensity = L * 7; TOWN.poolMat.opacity = smoothstep(0.05, 0.5, L) * 0.55; }
+  if (TOWN.litMat) TOWN.litMat.emissiveIntensity = smoothstep(0.02, 0.5, L) * 2.2;
+  if (TOWN.lampInfo) {   // photocells trip at slightly different light levels; filaments warm up orange before settling
+    GU.uTownOn.value = L > 0.02 ? 1 : 0;
+    TOWN.lampInfo.forEach((l, i) => {
+      let on = smoothstep(l.thr, l.thr + 0.05, L);
+      l.wait = on > l.on + 1e-3 ? l.wait + dt : 0; if (l.wait < l.delay && on > l.on) on = l.on;   // each one strikes after its own short delay
+      if (Math.abs(on - l.on) < 1e-4 && frameNo % 60) return;
+      l.on = damp(l.on, on, on > l.on ? 2.5 : 6, dt); const warm = l.on * l.on;
+      GU.uTLampCol.value[i].set(l.col.x * l.on, l.col.y * l.on * lerp(0.55, 1, warm), l.col.z * l.on * lerp(0.3, 1, warm), 0);
+      TOWN.lampOn.value[i] = l.on; TOWN.halos.setMatrixAt(i, mtx(TOWN.lamps[i].toArray(), [0, 0, 0], 1.8 * l.on + 1e-4));
+    });
+    TOWN.halos.instanceMatrix.needsUpdate = true;
+  }
   if (L > 0.01) LAMPS.forEach((l, i) => { if (!l.flick) return; const f = 0.82 + 0.18 * Math.sin(t * 17 + l.seed) * Math.sin(t * 7.3 + l.seed * 2) + 0.05 * Math.sin(t * 31 + l.seed); GU.uLampCol.value[i].set(l.col.x * f, l.col.y * f, l.col.z * f, 0); });
   if (STRUCT.flag) { const w = GU.uWindDir.value; STRUCT.flag.rotation.y = Math.atan2(-w.y, w.x); }
   // umbrellas close in a storm
