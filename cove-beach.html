@@ -1383,7 +1383,8 @@ function buildCliffs() {
     const a = new V3(-28.5, -4, -61), b = new V3(-16.5, -4, -67.5), H = 12.5, pts = [];
     const c = a.clone().add(b).multiplyScalar(0.5), half = b.clone().sub(a).multiplyScalar(0.5);
     for (let i = 0; i <= 16; i++) { const th = i / 16 * Math.PI; pts.push(c.clone().addScaledVector(half, -Math.cos(th)).add(new V3(0, Math.sin(th) * H * (i === 0 || i === 16 ? 1 : 1), 0))); }
-    pts[0].y = -6; pts[16].y = -6;
+    const legY = p => { let g = groundAt(p.x, p.z); for (let k = 0; k < 10; k++) { const t = k / 10 * TAU; g = Math.min(g, groundAt(p.x + Math.cos(t) * 4, p.z + Math.sin(t) * 4)); } return Math.min(-6, g - 1.5); };
+    pts[0].y = legY(a); pts[16].y = legY(b);
     let g = tubeAlong(pts, u => lerp(3.4, 2.1, Math.sin(u * Math.PI) ** 0.7), 18, 64);
     g = weld(g, 1e-3);
     displace(g, v => {
@@ -1420,9 +1421,17 @@ function buildRocks() {
   for (let i = 0; i < VAR; i++) geos.push(rockGeo(i + 1, 3, 0.06 + 0.05 * (i % 3)));
   const place = (x, z, s, sy = 1, yOff = null, rotY = rand(0, TAU)) => {
     if (Math.hypot(x - 41.2, z - 15.5) < 6.5 + s) return;            // keep the tide-pool shelf clear
-    const gy = groundAt(x, z), y = yOff === null ? gy + s * sy * 0.25 : yOff;
+    const gy = groundAt(x, z), sx = s * rand(0.8, 1.3), sz = s * rand(0.8, 1.3), R = Math.max(sx, sz);
+    let y = yOff === null ? gy + s * sy * 0.25 : yOff, hy = s * sy;
+    // seat the rock: the rim of its flat underside (raised up to 0.2R by the tilt) must sit below the lowest seabed
+    // under its footprint, else it hangs in the water; stretch it down keeping its top, or sink it if that's too far
+    let gMin = gy; for (let k = 0; k < 10; k++) { const a = k / 10 * TAU; gMin = Math.min(gMin, groundAt(x + Math.cos(a) * R * 1.1, z + Math.sin(a) * R * 1.1)); }
+    const B = gMin - 0.1 * s;
+    if (y - 0.45 * hy + 0.2 * R > B) {
+      const top = y + hy; hy = Math.min((top - B + 0.2 * R) / 1.45, hy * 2.2); y = Math.min(top - hy, B + 0.45 * hy - 0.2 * R);
+    }
     const v = Math.floor(rand(0, VAR));
-    mats[v].push(mtx([x, y, z], [rand(-0.2, 0.2), rotY, rand(-0.2, 0.2)], [s * rand(0.8, 1.3), s * sy, s * rand(0.8, 1.3)]));
+    mats[v].push(mtx([x, y, z], [rand(-0.2, 0.2), rotY, rand(-0.2, 0.2)], [sx, hy, sz]));
     ROCKS.push({ x, y, z, r: s * 1.05 });
   };
   rng = mulberry32(4242);
@@ -1461,6 +1470,7 @@ function buildTidePools() {
     let y = 0.2 + 0.07 * fbm2(x * 0.9, z * 0.9, 4) + 0.05 * fbm2(x * 3, z * 3, 2);
     const e = Math.max(Math.abs(x) / (W / 2), Math.abs(z) / (D / 2)) + 0.15 * fbm2(x * 0.5 + 9, z * 0.5, 3);
     y -= smoothstep(0.7, 1.0, e) * 1.8;
+    { const w = new V3(x, 0, z).applyAxisAngle(new V3(0, 1, 0), ang).add(C); y = lerp(y, Math.min(y, groundAt(w.x, w.z) - 0.4), smoothstep(0.7, 1.0, e)); }
     for (const [px, pz, rx, rz] of pools) { const r = Math.hypot((x - px) / rx, (z - pz) / rz); y -= 0.42 * smoothstep(1.05, 0.55, r) + 0.08 * smoothstep(1.3, 1.0, r) * -0.3; }
     p.setY(i, y);
   }
